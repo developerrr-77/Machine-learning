@@ -2,7 +2,7 @@
 name = "inventory-predictions"
 version = "0.1.0"
 description = ""
-authors = ["shahnoor77 <shahnoorkhan9955@gmail.com>"]
+authors = ["developerrr-77 <shahnoorr9955@gmail.com>"]
 readme = "README.md"
 packages = [{include = "inventory_predictions", from = "src"}]
 
