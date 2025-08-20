@@ -10,6 +10,24 @@ packages = [{include = "inventory_predictions", from = "src"}]
 python = ">=3.10,<3.13"
 openpyxl = "^3.1.5"
 python-dotenv = "^1.1.1"
+pyarrow = "^21.0.0"
+hopsworks = {extras = ["python"], version = "^4.3.1"}
+joblib = "^1.5.1"
+comet-ml = "^3.50.0"
+holidays = "^0.78"
+scikit-learn = "^1.7.1"
+lightgbm = "^4.6.0"
+catboost = "^1.2.8"
+torch = "^2.8.0"
+pytorch-lightning = "^2.5.3"
+pytorch-forecasting = "^1.4.0"
+pydantic-settings = "^2.10.1"
+optuna = "^4.5.0"
+xgboost = "^3.0.4"
+logger = "^1.4"
+statsmodels = "^0.14.5"
+prophet = "^1.1.5"
+
 
 
 [build-system]
