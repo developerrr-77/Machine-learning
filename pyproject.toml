@@ -4,7 +4,13 @@ version = "0.1.0"
 description = ""
 authors = ["developerrr-77 <shahnoorr9955@gmail.com>"]
 readme = "README.md"
-packages = [{include = "inventory_predictions", from = "src"}]
+
+# register all pipeline src directories
+packages = [
+  { include = "*", from = "feature_pipeline/src" },
+  { include = "*", from = "training_pipeline/src" },
+  { include = "*", from = "inference_pipeline/src" }
+]
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.13"
@@ -27,8 +33,6 @@ xgboost = "^3.0.4"
 logger = "^1.4"
 statsmodels = "^0.14.5"
 prophet = "^1.1.5"
-
-
 
 [build-system]
 requires = ["poetry-core"]
