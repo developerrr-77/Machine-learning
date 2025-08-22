@@ -1,4 +1,3 @@
-
 from config import TrainingPipelineConfig
 from pipeline import TrainingPipeline
 import logging
@@ -13,7 +12,7 @@ def main():
             logging.info("Training pipeline completed successfully")
             logging.info(f"Training results: {results}")
         else:
-            logging.error("Training pipeline failed")
+            logging.error("Training pipeline failed: No results returned")
     except Exception as e:
         logging.error(f"Main execution failed: {str(e)}")
         raise

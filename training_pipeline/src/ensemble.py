@@ -1,7 +1,7 @@
 
 import pandas as pd
 import numpy as np
-from typing import Dict
+from typing import Dict, Optional
 from prophet import Prophet
 from xgboost import XGBRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error
@@ -9,36 +9,74 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-class Ensemble:
-    """Combine Prophet and XGBoost predictions for demand forecasting."""
+class EnsemblePredictor:
+    """Combine Prophet and XGBoost predictions."""
     
-    def evaluate(self, prophet_model: Prophet, xgboost_model: XGBRegressor, df: pd.DataFrame) -> Dict[str, float]:
-        """Evaluate ensemble of Prophet and XGBoost models."""
+    def __init__(self, prophet_model: Optional[Prophet], xgboost_model: Optional[XGBRegressor], weights: tuple = (0.7, 0.3)):
+        self.prophet_model = prophet_model
+        self.xgboost_model = xgboost_model
+        self.weights = weights
+    
+    def predict(self, df: pd.DataFrame, periods: int = 3) -> pd.DataFrame:
+        """Generate ensemble predictions."""
         try:
-            # Prepare data for Prophet
-            prophet_df = df[['OrderDate', 'NoOfPItems']].rename(columns={'OrderDate': 'ds', 'NoOfPItems': 'y'})
+            prophet_preds, xgboost_preds = None, None
             
-            # Generate Prophet predictions
-            future = prophet_model.make_future_dataframe(periods=0, freq='ME')
-            prophet_forecast = prophet_model.predict(future)
-            prophet_preds = prophet_forecast['yhat'].values
+            if self.prophet_model:
+                prophet_df = df[['OrderDate', 'NoOfPItems']].rename(columns={'OrderDate': 'ds', 'NoOfPItems': 'y'})
+                future = self.prophet_model.make_future_dataframe(periods=periods, freq='ME')
+                prophet_forecast = self.prophet_model.predict(future)
+                prophet_preds = prophet_forecast['yhat'].iloc[-periods:]
             
-            # Prepare data for XGBoost
-            X = df[['Month', 'Year', 'Quarter', 'IsHoliday', 'Lag1', 'Lag2', 'RollingMean', 'RollingStd']]
-            y = df['NoOfPItems']
+            if self.xgboost_model:
+                X = df[['Month', 'Year', 'Quarter', 'IsHoliday', 'Lag1', 'Lag2', 'RollingMean', 'RollingStd']]
+                xgboost_preds = self.xgboost_model.predict(X.tail(periods))
             
-            # Generate XGBoost predictions
-            xgboost_preds = xgboost_model.predict(X)
+            if prophet_preds is not None and xgboost_preds is not None:
+                ensemble_preds = self.weights[0] * xgboost_preds + self.weights[1] * prophet_preds
+            elif xgboost_preds is not None:
+                ensemble_preds = xgboost_preds
+            elif prophet_preds is not None:
+                ensemble_preds = prophet_preds
+            else:
+                raise ValueError("Both models failed to generate predictions")
             
-            # Combine predictions (simple 50/50 weighted average)
-            ensemble_preds = 0.5 * prophet_preds + 0.5 * xgboost_preds
+            return pd.DataFrame({
+                'ds': future['ds'].iloc[-periods:] if self.prophet_model else pd.date_range(start=df['OrderDate'].iloc[-1], periods=periods+1, freq='ME')[1:],
+                'yhat': ensemble_preds
+            })
+        
+        except Exception as e:
+            logger.error(f"Error generating ensemble predictions: {str(e)}")
+            raise
+    
+    def evaluate(self, df: pd.DataFrame) -> Dict[str, float]:
+        """Evaluate ensemble model on test data."""
+        try:
+            prophet_preds, xgboost_preds = None, None
             
-            # Compute metrics
+            if self.prophet_model:
+                prophet_df = df[['OrderDate', 'NoOfPItems']].rename(columns={'OrderDate': 'ds', 'NoOfPItems': 'y'})
+                prophet_forecast = self.prophet_model.predict(prophet_df)
+                prophet_preds = prophet_forecast['yhat']
+            
+            if self.xgboost_model:
+                X = df[['Month', 'Year', 'Quarter', 'IsHoliday', 'Lag1', 'Lag2', 'RollingMean', 'RollingStd']]
+                xgboost_preds = self.xgboost_model.predict(X)
+            
+            if prophet_preds is not None and xgboost_preds is not None:
+                ensemble_preds = self.weights[0] * xgboost_preds + self.weights[1] * prophet_preds
+            elif xgboost_preds is not None:
+                ensemble_preds = xgboost_preds
+            elif prophet_preds is not None:
+                ensemble_preds = prophet_preds
+            else:
+                raise ValueError("Both models failed to generate predictions")
+            
             metrics = {
-                'mae': mean_absolute_error(y, ensemble_preds),
-                'rmse': np.sqrt(mean_squared_error(y, ensemble_preds))
+                'mae': mean_absolute_error(df['NoOfPItems'], ensemble_preds),
+                'rmse': np.sqrt(mean_squared_error(df['NoOfPItems'], ensemble_preds))
             }
-            
             return metrics
         
         except Exception as e:

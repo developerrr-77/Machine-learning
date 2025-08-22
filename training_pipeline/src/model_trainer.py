@@ -1,7 +1,7 @@
-
 import pandas as pd
 import numpy as np
 from typing import Dict, Optional, Tuple
+from comet_ml import Experiment  # Import comet_ml first
 from prophet import Prophet
 from xgboost import XGBRegressor
 from sklearn.model_selection import TimeSeriesSplit
@@ -11,15 +11,17 @@ import joblib
 from pathlib import Path
 import logging
 import re
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
 class ModelTrainer:
     """Train Prophet and XGBoost models for a single SKU."""
     
-    def __init__(self, n_splits: int = 3, test_size: float = 0.2):
+    def __init__(self, n_splits: int = 3, test_size: float = 0.2, experiment: Optional[Experiment] = None):
         self.n_splits = n_splits
         self.test_size = test_size
+        self.experiment = experiment
     
     def train_prophet(self, df: pd.DataFrame) -> Tuple[Optional[Prophet], Optional[Dict[str, float]]]:
         """Train Prophet model and evaluate."""
@@ -35,7 +37,7 @@ class ModelTrainer:
                 return None, None
             
             # Dynamically set n_changepoints based on data size
-            n_changepoints = min(25, len(prophet_df) // 2)  # Default is 25, adjust if data is small
+            n_changepoints = min(25, len(prophet_df) // 2)
             
             # Ensure test_size is at least 1
             test_size = max(1, int(len(df) * self.test_size))
@@ -44,7 +46,6 @@ class ModelTrainer:
             
             for train_idx, test_idx in tscv.split(prophet_df):
                 train_df, test_df = prophet_df.iloc[train_idx], prophet_df.iloc[test_idx]
-                # Check if train_df has enough non-NaN rows
                 if train_df['y'].notna().sum() < 2:
                     logger.warning(f"Skipping CV fold: train_df has {train_df['y'].notna().sum()} non-NaN rows, need at least 2")
                     continue
@@ -61,12 +62,11 @@ class ModelTrainer:
                 metrics['mae'].append(mean_absolute_error(test_df['y'], preds))
                 metrics['rmse'].append(np.sqrt(mean_squared_error(test_df['y'], preds)))
             
-            # Check if any valid folds were processed
             if not metrics['mae']:
                 logger.warning("No valid CV folds processed for Prophet due to insufficient non-NaN data")
                 return None, None
             
-            # Train on full data with new model instance
+            # Train on full data
             if prophet_df['y'].notna().sum() < 2:
                 logger.warning(f"Skipping final Prophet training: {prophet_df['y'].notna().sum()} non-NaN rows, need at least 2")
                 return None, None
@@ -83,6 +83,8 @@ class ModelTrainer:
         
         except Exception as e:
             logger.error(f"Error training Prophet: {str(e)}")
+            if self.experiment:
+                self.experiment.log_other("prophet_error", str(e))
             raise
     
     def objective_xgb(self, trial: optuna.Trial, X: pd.DataFrame, y: pd.Series, tscv: TimeSeriesSplit) -> float:
@@ -108,7 +110,7 @@ class ModelTrainer:
         
         if not mae_scores:
             logger.warning("No valid CV folds processed for XGBoost due to insufficient non-NaN data")
-            return float('inf')  # Return high value to discourage this parameter set
+            return float('inf')
         return np.mean(mae_scores)
     
     def train_xgboost(self, df: pd.DataFrame) -> Tuple[Optional[XGBRegressor], Optional[Dict[str, float]]]:
@@ -117,7 +119,6 @@ class ModelTrainer:
             X = df[['Month', 'Year', 'Quarter', 'IsHoliday', 'Lag1', 'Lag2', 'RollingMean', 'RollingStd']]
             y = df['NoOfPItems']
             
-            # Check if data is sufficient for cross-validation and has enough non-NaN rows
             if len(df) <= self.n_splits:
                 logger.warning(f"Skipping XGBoost training for SKU with {len(df)} samples, need more than {self.n_splits} for {self.n_splits}-fold CV")
                 return None, None
@@ -125,17 +126,14 @@ class ModelTrainer:
                 logger.warning(f"Skipping XGBoost training for SKU with {y.notna().sum()} non-NaN rows, need at least 2")
                 return None, None
             
-            # Ensure test_size is at least 1
             test_size = max(1, int(len(df) * self.test_size))
             tscv = TimeSeriesSplit(n_splits=self.n_splits, test_size=test_size)
             
-            # Hyperparameter tuning
             study = optuna.create_study(direction='minimize')
             study.optimize(lambda trial: self.objective_xgb(trial, X, y, tscv), n_trials=20)
             best_params = study.best_params
             logger.info(f"Best XGBoost params: {best_params}")
             
-            # Train final model
             model = XGBRegressor(**best_params, objective='reg:squarederror')
             metrics = {'mae': [], 'rmse': []}
             
@@ -150,12 +148,10 @@ class ModelTrainer:
                 metrics['mae'].append(mean_absolute_error(y_test, preds))
                 metrics['rmse'].append(np.sqrt(mean_squared_error(y_test, preds)))
             
-            # Check if any valid folds were processed
             if not metrics['mae']:
                 logger.warning("No valid CV folds processed for XGBoost due to insufficient non-NaN data")
                 return None, None
             
-            # Train on full data
             if y.notna().sum() < 2:
                 logger.warning(f"Skipping final XGBoost training: {y.notna().sum()} non-NaN rows, need at least 2")
                 return None, None
@@ -166,18 +162,32 @@ class ModelTrainer:
         
         except Exception as e:
             logger.error(f"Error training XGBoost: {str(e)}")
+            if self.experiment:
+                self.experiment.log_other("xgboost_error", str(e))
             raise
     
     def save_model(self, model: object, model_type: str, sku: str, model_dir: str) -> None:
-        """Save model to disk."""
+        """Save model to disk and push to Comet.ml Model Registry."""
         try:
-            Path(model_dir).mkdir(parents=True, exist_ok=True)
-            # Sanitize SKU name to remove invalid characters for file paths
+            # Sanitize SKU name
             safe_sku = re.sub(r'[^\w\-]', '_', sku.strip())
-            model_path = Path(model_dir) / f"{safe_sku}_{model_type}.pkl"
+            # Create unique model name with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            model_name = f"{safe_sku}_{model_type}_{timestamp}"
+            
+            # Save to disk
+            Path(model_dir).mkdir(parents=True, exist_ok=True)
+            model_path = Path(model_dir) / f"{model_name}.pkl"
             joblib.dump(model, model_path)
             logger.info(f"Saved {model_type} model for SKU {sku} to {model_path}")
+            
+            # Push to Comet.ml Model Registry
+            if self.experiment:
+                self.experiment.log_model(model_name, str(model_path), file_name=f"{model_name}.pkl")
+                logger.info(f"Pushed {model_type} model for SKU {sku} to Comet.ml Model Registry as {model_name}")
         
         except Exception as e:
-            logger.error(f"Error saving {model_type} model for SKU {sku}: {str(e)}")
+            logger.error(f"Error saving or pushing {model_type} model for SKU {sku}: {str(e)}")
+            if self.experiment:
+                self.experiment.log_other(f"{model_type}_save_error", str(e))
             raise
